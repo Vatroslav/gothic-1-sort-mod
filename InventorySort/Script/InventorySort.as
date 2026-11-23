@@ -1,14 +1,15 @@
-// Inventory Sort: keeps the hero's backpack sorted by item type, then by value.
+// Inventory Sort: sorts the hero's inventory by item type, then strength,
+// then name.
 //
-// The game lists backpack items in the order of its own item list (new items
-// go to the end), and every inventory action (use, equip, drop) picks the item
-// by its place in that list. A mod that only reorders the view therefore makes
-// those actions hit the wrong item. This mod reorders the list itself, so the
-// view and the actions stay in step.
-//
-// Every entry's id is its place in the list (the game keeps it that way in
-// every inventory of the hero), so ids are renumbered after a reorder.
-// Equipped items and the hotbar live in their own inventories and are not
+// The game shows backpack items newest first: it orders them by the time each
+// item was last added (checked against a save: the inventory screen matched
+// that order item for item). Item positions in the game's own list do not
+// change the view. So this mod gives every backpack item a made-up "last
+// added" time that puts it in the wanted place: the first item gets the
+// latest time. Use, equip and drop keep working, because the game itself
+// builds the list it shows. A newly picked-up item gets the current time and
+// shows at the top until the open inventory is sorted again (a few times per
+// second). Equipped items and the hotbar live in their own lists and are not
 // touched.
 
 // Settings > Game > Inventory Sort. The Options menu edits and saves the
@@ -22,7 +23,7 @@ class UInventorySortSettings : UGothicModExt_UserSettings
     FModUserSettingsBool Enabled = FModUserSettingsBool(
         Value = true,
         DefaultValue = true,
-        DisplayText = FText::FromString("Sort the inventory by type, then by value"));
+        DisplayText = FText::FromString("Sort the inventory by type, strength and name"));
 }
 
 UCLASS(Abstract)
@@ -35,8 +36,15 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
     // listed inside each tab. An item goes to the first type it matches.
     TArray<FGameplayTag> TypeOrder;
 
-    // Place in TypeOrder per item kind, so the tag checks run once per kind.
+    // Per item kind, so the checks run once per kind.
     TMap<TSubclassOf<UItemDefinition>, int> GroupByKind;
+    TMap<TSubclassOf<UItemDefinition>, float32> StrengthByKind;
+
+    // Every item kind seen so far, sorted by lower-case name, and each kind's
+    // place in that order.
+    TArray<FString> SortedNames;
+    TArray<TSubclassOf<UItemDefinition>> SortedKinds;
+    TMap<TSubclassOf<UItemDefinition>, int> NameRank;
 
     float32 SinceCheck = 1.0f;
 
@@ -62,14 +70,14 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
             return;
 
         // Only the hero's own inventory screen. Trade, loot and crafting lists
-        // show the same items but keep their own positions while open.
+        // show the same items, but keep them still while those screens are open.
         EInventoryOpenedStates State = Inventory.GetInventoryOpenedState();
         if (State == EInventoryOpenedStates::Looting
             || State == EInventoryOpenedStates::TradingInventoryPlayer
             || State == EInventoryOpenedStates::TradingInventoryTrader
             || State == EInventoryOpenedStates::Crafting)
             return;
-        // Picking a ring or armor slot works with item positions too.
+        // Picking a ring or armor slot works with item positions in the view.
         if (Inventory.IsWearableEquipmentMode())
             return;
 
@@ -81,100 +89,102 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
             Inventory.RefreshInventory(true);
     }
 
-    UFUNCTION(BlueprintOverride)
-    void Destruct()
-    {
-        GroupByKind.Empty();
-    }
-
-    // Reorders the backpack list when it is not sorted. Returns true when it
-    // changed anything. Empty entries (left when a stack is used up) do not
-    // count as unsorted and go to the end when the list is reordered.
+    // Sets the "last added" times of the backpack items when they are not in
+    // the wanted order. Returns true when it changed anything.
     bool SortBackpack(UDataModule_Container Container)
     {
         TArray<FItemVirtualData>& Items = Container.GetItemsIn(EInventoryTypes::MainContainer);
         int Count = Items.Num();
-        if (Count < 2)
+        if (Count < 1)
             return false;
 
         if (TypeOrder.Num() == 0)
             BuildTypeOrder();
 
-        const int EmptyGroup = 1000000;
-        TArray<int> Group;
-        TArray<int> Value;
-        // First place of the same kind in the current list, so stacks of one
-        // kind stay together and keep their relative order.
-        TArray<int> KindPlace;
-        TArray<bool> Filled;
-        TMap<TSubclassOf<UItemDefinition>, int> FirstPlace;
-
+        // Entries with an item; empty ones (left when a stack is used up) are
+        // not shown and keep their time.
+        TArray<int> Entries;
         for (int I = 0; I < Count; ++I)
         {
             TSubclassOf<UItemDefinition> Kind = Items[I].m_SlotData.m_ItemDefinition;
-            bool bFilled = Kind.IsValid() && Items[I].m_SlotData.m_ItemCount > 0;
-            Filled.Add(bFilled);
-            if (!bFilled)
-            {
-                Group.Add(EmptyGroup);
-                Value.Add(0);
-                KindPlace.Add(I);
-                continue;
-            }
+            if (Kind.IsValid() && Items[I].m_SlotData.m_ItemCount > 0)
+                Entries.Add(I);
+        }
+        if (Entries.Num() == 0)
+            return false;
+
+        // Register new kinds first: adding a name moves the ranks of others.
+        for (int Entry : Entries)
+            RegisterName(Items[Entry].m_SlotData.m_ItemDefinition);
+
+        TArray<int> Group;
+        TArray<float32> Strength;
+        TArray<int> Rank;
+        // First place of the same kind in the list, so stacks of one kind stay
+        // together even when another kind has the same name.
+        TArray<int> KindPlace;
+        TMap<TSubclassOf<UItemDefinition>, int> FirstPlace;
+        for (int K = 0; K < Entries.Num(); ++K)
+        {
+            TSubclassOf<UItemDefinition> Kind = Items[Entries[K]].m_SlotData.m_ItemDefinition;
             UItemDefinition Item = Kind.GetDefaultObject();
             Group.Add(GroupOf(Kind, Item));
-            Value.Add(IsValid(Item) ? Item.m_Value : 0);
-            int Place = I;
+            Strength.Add(StrengthOf(Kind, Item));
+            int Place = 0;
+            NameRank.Find(Kind, Place);
+            Rank.Add(Place);
+            Place = K;
             if (!FirstPlace.Find(Kind, Place))
             {
-                Place = I;
-                FirstPlace.Add(Kind, I);
+                Place = K;
+                FirstPlace.Add(Kind, K);
             }
             KindPlace.Add(Place);
         }
 
-        // Insertion sort: stable, and close to one pass when the list is
-        // already sorted except for a few new items at the end.
+        // Wanted order (indexes into Entries). Insertion sort: stable, and
+        // close to one pass when only a few items are out of place.
         TArray<int> Order;
-        for (int I = 0; I < Count; ++I)
+        for (int K = 0; K < Entries.Num(); ++K)
         {
             int J = Order.Num();
-            while (J > 0 && Comes(I, Order[J - 1], Group, Value, KindPlace))
+            while (J > 0 && Comes(K, Order[J - 1], Group, Strength, Rank, KindPlace))
                 --J;
-            Order.Insert(I, J);
+            Order.Insert(K, J);
         }
 
-        // Sorted already, apart from where the empty entries sit?
+        // Already shown in this order? Times must fall strictly along it.
         bool bSorted = true;
-        int Previous = -1;
-        for (int I = 0; I < Count && bSorted; ++I)
+        for (int K = 1; K < Order.Num() && bSorted; ++K)
         {
-            int Index = Order[I];
-            if (!Filled[Index])
-                continue;
-            if (Index < Previous)
+            float Earlier = Items[Entries[Order[K - 1]]].m_TimeLastAdded.TotalSeconds;
+            float Later = Items[Entries[Order[K]]].m_TimeLastAdded.TotalSeconds;
+            if (Later >= Earlier)
                 bSorted = false;
-            Previous = Index;
         }
         if (bSorted)
             return false;
 
-        TArray<FItemVirtualData> Before = Items;
-        for (int I = 0; I < Count; ++I)
-        {
-            Items[I] = Before[Order[I]];
-            Items[I].m_Id = I;
-        }
+        // First item gets the latest time. Small values (seconds after the
+        // start of the game) keep every item older than anything picked up
+        // later, and they stay the same on every sort.
+        int Total = Order.Num();
+        for (int K = 0; K < Total; ++K)
+            Items[Entries[Order[K]]].m_TimeLastAdded = FInGameTime::FromSeconds(float(Total - K));
         return true;
     }
 
-    // True when entry A belongs before entry B.
-    bool Comes(int A, int B, const TArray<int>& Group, const TArray<int>& Value, const TArray<int>& KindPlace) const
+    // True when entry A belongs before entry B: type, then strength (highest
+    // first), then name, then kind and list position.
+    bool Comes(int A, int B, const TArray<int>& Group, const TArray<float32>& Strength,
+               const TArray<int>& Rank, const TArray<int>& KindPlace) const
     {
         if (Group[A] != Group[B])
             return Group[A] < Group[B];
-        if (Value[A] != Value[B])
-            return Value[A] > Value[B];
+        if (Strength[A] != Strength[B])
+            return Strength[A] > Strength[B];
+        if (Rank[A] != Rank[B])
+            return Rank[A] < Rank[B];
         if (KindPlace[A] != KindPlace[B])
             return KindPlace[A] < KindPlace[B];
         return A < B;
@@ -182,24 +192,91 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
 
     int GroupOf(TSubclassOf<UItemDefinition> Kind, UItemDefinition Item)
     {
-        int Group = 0;
-        if (GroupByKind.Find(Kind, Group))
-            return Group;
+        int Found = 0;
+        if (GroupByKind.Find(Kind, Found))
+            return Found;
         // Types the game's tabs do not list go after all the others.
-        Group = TypeOrder.Num();
+        Found = TypeOrder.Num();
         if (IsValid(Item))
         {
             for (int I = 0; I < TypeOrder.Num(); ++I)
             {
                 if (Item.MatchesItemType(TypeOrder[I]) || Item.HasItemSpec(TypeOrder[I]))
                 {
-                    Group = I;
+                    Found = I;
                     break;
                 }
             }
         }
-        GroupByKind.Add(Kind, Group);
-        return Group;
+        GroupByKind.Add(Kind, Found);
+        return Found;
+    }
+
+    // Weapons: sum of base damage over all damage types. Armor: sum of all
+    // protections. Everything else: 0, so it goes by name.
+    float32 StrengthOf(TSubclassOf<UItemDefinition> Kind, UItemDefinition Item)
+    {
+        float32 Found = 0.0f;
+        if (StrengthByKind.Find(Kind, Found))
+            return Found;
+        Found = 0.0f;
+        auto Weapon = Cast<UWeaponDefinition>(Item);
+        if (IsValid(Weapon))
+        {
+            for (auto DamageEntry : Weapon.m_DamageBase)
+                Found += DamageEntry.Value;
+        }
+        auto Armor = Cast<UArmorDefinition>(Item);
+        if (IsValid(Armor))
+        {
+            Found = float32(Armor.GetEdgeProtection() + Armor.GetBluntProtection() + Armor.GetPointProtection()
+                + Armor.GetFireProtection() + Armor.GetEnergyProtection() + Armor.GetIceProtection()
+                + Armor.GetWindProtection());
+        }
+        StrengthByKind.Add(Kind, Found);
+        return Found;
+    }
+
+    // Adds a kind to the name order if it is new, and renumbers the ranks.
+    void RegisterName(TSubclassOf<UItemDefinition> Kind)
+    {
+        int Existing = 0;
+        if (NameRank.Find(Kind, Existing))
+            return;
+        UItemDefinition Item = Kind.GetDefaultObject();
+        FString ItemName = "";
+        if (IsValid(Item))
+            ItemName = Item.m_Name.ToString().ToLower();
+        int At = SortedNames.Num();
+        for (int I = 0; I < SortedNames.Num(); ++I)
+        {
+            if (CompareNames(ItemName, SortedNames[I]) < 0)
+            {
+                At = I;
+                break;
+            }
+        }
+        SortedNames.Insert(ItemName, At);
+        SortedKinds.Insert(Kind, At);
+        NameRank.Empty();
+        for (int I = 0; I < SortedKinds.Num(); ++I)
+            NameRank.Add(SortedKinds[I], I);
+    }
+
+    // Negative when A sorts before B, by character codes of lower-case names.
+    int CompareNames(const FString& A, const FString& B) const
+    {
+        int LenA = A.Len();
+        int LenB = B.Len();
+        int Shorter = LenA < LenB ? LenA : LenB;
+        for (int I = 0; I < Shorter; ++I)
+        {
+            int CharA = String::GetCharacterAsNumber(A, I);
+            int CharB = String::GetCharacterAsNumber(B, I);
+            if (CharA != CharB)
+                return CharA - CharB;
+        }
+        return LenA - LenB;
     }
 
     // Same tabs and types as the game's UI/InventoryFilters.as, in its order.

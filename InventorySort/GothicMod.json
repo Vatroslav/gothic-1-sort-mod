@@ -3,8 +3,8 @@
   "title": "Inventory Sort",
   "author": "Vatroslav",
   "projectWebsiteURL": "https://github.com/Vatroslav/gothic-1-sort-mod",
-  "description": "Keeps your inventory sorted: items are grouped by type in the order of the inventory tabs, and the most valuable items come first within each type.\n\nThe mod reorders the game's own item list, not only the view, so using, equipping and dropping still act on the item you see.\n\nTurn it off in Settings > Game > Inventory Sort.",
-  "modVersion": "0.1.0",
+  "description": "Keeps your inventory sorted: items are grouped by type in the order of the inventory tabs. Within a type, weapons go by damage and armor by protection, strongest first, then everything by name.\n\nUsing, equipping and dropping still act on the item you see.\n\nTurn it off in Settings > Game > Inventory Sort.",
+  "modVersion": "0.2.0",
   "scriptPreprocessorDefines": [],
   "tags": [
     "Enhancement"

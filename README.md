@@ -1,16 +1,16 @@
 # Gothic 1 Remake: Inventory Sort
 
-A small script-only mod for Gothic 1 Remake: the inventory stays sorted. Items are grouped by type, in the order of the inventory tabs (melee weapons, ranged weapons, magic, wearables, food, potions, materials, documents, miscellaneous, artefacts) and of the item types inside each tab (for example food, then herbs). Within a type, the most valuable item comes first.
+A small script-only mod for Gothic 1 Remake: the inventory stays sorted. Items are grouped by type, in the order of the inventory tabs (melee weapons, ranged weapons, magic, wearables, food, potions, materials, documents, miscellaneous, artefacts) and of the item types inside each tab (for example one-handed swords, then two-handed swords; food, then herbs). Within a type, weapons go by damage and armor by protection, strongest first; then items go by name.
 
 Turn it off in `Settings > Game > Inventory Sort`.
 
 ## How it works
 
-The game shows backpack items in the order of its own item list, with new items added at the end, and every inventory action (use, equip, drop) picks the item by its place in that list. A mod that only reorders the view makes those actions hit the wrong item. This mod reorders the list itself, so what you see is what you use.
+The game shows backpack items newest first, ordered by the time each item was last added. The mod gives every backpack item a made-up "last added" time that puts it in the wanted place, so the game's own list shows the sorted order and using, equipping and dropping still act on the item you see. A newly picked-up item shows at the top until the open inventory sorts it in, a moment later.
 
-While the inventory screen is open, the mod checks the list a few times per second and reorders it when it is out of order (usually right after opening, when new items sit at the end). Equipped items and the hotbar are kept in separate lists by the game and are not touched. Trade, loot and crafting screens are not sorted while they are open; they show the order from the last time the inventory was opened.
+Items on the hotbar and equipped items are kept in separate lists by the game, are not touched and stay at the top of their tab. Trade, loot and crafting screens are not sorted while they are open; they show the order from the last time the inventory was open.
 
-The new order is the game's own list, so it is saved with the game. Removing the mod keeps the last order; new items go to the end again.
+The times are saved with the game. After removing the mod the last order stays, and new items show at the top again.
 
 ## Install
 
