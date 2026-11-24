@@ -1,16 +1,23 @@
 // Inventory Sort: sorts the hero's inventory by item type, then strength,
-// then name.
+// then name, in the inventory screen and in the sell list of the trade screen.
 //
-// The game shows backpack items newest first: it orders them by the time each
-// item was last added (checked against a save: the inventory screen matched
-// that order item for item). Item positions in the game's own list do not
-// change the view. So this mod gives every backpack item a made-up "last
-// added" time that puts it in the wanted place: the first item gets the
-// latest time. Use, equip and drop keep working, because the game itself
-// builds the list it shows. A newly picked-up item gets the current time and
-// shows at the top until the open inventory is sorted again (a few times per
-// second). Equipped items and the hotbar live in their own lists and are not
-// touched.
+// The inventory screen shows backpack items newest first: it orders them by
+// the time each item was last added (checked against a save: the inventory
+// screen matched that order item for item). Item positions in the game's own
+// list do not change that view. So this mod gives every backpack item a
+// made-up "last added" time that puts it in the wanted place: the first item
+// gets the latest time. Use, equip and drop keep working, because the game
+// itself builds the list it shows. A newly picked-up item gets the current
+// time and shows at the top until the open inventory is sorted again (a few
+// times per second).
+//
+// The trade screen's sell list ignores those times: after the hotbar it shows
+// the backpack items in the order of the game's backpack list (checked against
+// a save and a screenshot). There the mod moves the items themselves into the
+// sorted places of that list, but only while nothing waits in the trade panel,
+// because waiting items point at their place in the list.
+//
+// Equipped items and the hotbar live in their own lists and are not touched.
 
 // Settings > Game > Inventory Sort. The Options menu edits and saves the
 // default object, so the extension reads the current value from there.
@@ -29,9 +36,6 @@ class UInventorySortSettings : UGothicModExt_UserSettings
 UCLASS(Abstract)
 class UInventorySortBase : UGothicModExt_WidgetExtension
 {
-    // How often the open inventory is checked, in seconds.
-    const float32 CheckInterval = 0.2f;
-
     // Item types in the order of the game's inventory tabs and of the types
     // listed inside each tab. An item goes to the first type it matches.
     TArray<FGameplayTag> TypeOrder;
@@ -46,52 +50,17 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
     TArray<TSubclassOf<UItemDefinition>> SortedKinds;
     TMap<TSubclassOf<UItemDefinition>, int> NameRank;
 
-    float32 SinceCheck = 1.0f;
-
     UFUNCTION(BlueprintOverride)
     bool RequiresTick() const
     {
         return true;
     }
 
-    UFUNCTION(BlueprintOverride)
-    void Tick(FGeometry MyGeometry, float32 InDeltaTime)
-    {
-        SinceCheck += InDeltaTime;
-        if (SinceCheck < CheckInterval)
-            return;
-        SinceCheck = 0.0f;
-
-        if (!UInventorySortSettings.DefaultObject.Enabled.bValue)
-            return;
-
-        auto Inventory = Cast<UInventoryMain>(GetWidget());
-        if (!IsValid(Inventory) || !Inventory.IsVisible())
-            return;
-
-        // Only the hero's own inventory screen. Trade, loot and crafting lists
-        // show the same items, but keep them still while those screens are open.
-        EInventoryOpenedStates State = Inventory.GetInventoryOpenedState();
-        if (State == EInventoryOpenedStates::Looting
-            || State == EInventoryOpenedStates::TradingInventoryPlayer
-            || State == EInventoryOpenedStates::TradingInventoryTrader
-            || State == EInventoryOpenedStates::Crafting)
-            return;
-        // Picking a ring or armor slot works with item positions in the view.
-        if (Inventory.IsWearableEquipmentMode())
-            return;
-
-        UDataModule_Container Container = DataModule::GetContainerDataModule(Gameplay::GetPlayerCharacter(0));
-        if (!IsValid(Container))
-            return;
-
-        if (SortBackpack(Container))
-            Inventory.RefreshInventory(true);
-    }
-
-    // Sets the "last added" times of the backpack items when they are not in
-    // the wanted order. Returns true when it changed anything.
-    bool SortBackpack(UDataModule_Container Container)
+    // Sorts the backpack: sets the "last added" times of its items (the order
+    // of the inventory screen) and, with bMoveEntries, also moves the items
+    // into the sorted places of the backpack list (the order of the trade
+    // screen). Returns true when it changed anything.
+    bool SortBackpack(UDataModule_Container Container, bool bMoveEntries)
     {
         TArray<FItemVirtualData>& Items = Container.GetItemsIn(EInventoryTypes::MainContainer);
         int Count = Items.Num();
@@ -153,24 +122,73 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
             Order.Insert(K, J);
         }
 
-        // Already shown in this order? Times must fall strictly along it.
+        // List place of each item, in the wanted order.
+        TArray<int> Wanted;
+        for (int K = 0; K < Order.Num(); ++K)
+            Wanted.Add(Entries[Order[K]]);
+
+        bool bChanged = false;
+        if (bMoveEntries && MoveEntries(Items, Entries, Group, Wanted))
+            bChanged = true;
+
+        // Already in this order by time? Times must fall strictly along it.
         bool bSorted = true;
-        for (int K = 1; K < Order.Num() && bSorted; ++K)
+        for (int K = 1; K < Wanted.Num() && bSorted; ++K)
         {
-            float Earlier = Items[Entries[Order[K - 1]]].m_TimeLastAdded.TotalSeconds;
-            float Later = Items[Entries[Order[K]]].m_TimeLastAdded.TotalSeconds;
+            float Earlier = Items[Wanted[K - 1]].m_TimeLastAdded.TotalSeconds;
+            float Later = Items[Wanted[K]].m_TimeLastAdded.TotalSeconds;
             if (Later >= Earlier)
                 bSorted = false;
         }
         if (bSorted)
-            return false;
+            return bChanged;
 
         // First item gets the latest time. Small values (seconds after the
         // start of the game) keep every item older than anything picked up
         // later, and they stay the same on every sort.
-        int Total = Order.Num();
+        int Total = Wanted.Num();
         for (int K = 0; K < Total; ++K)
-            Items[Entries[Order[K]]].m_TimeLastAdded = FInGameTime::FromSeconds(float(Total - K));
+            Items[Wanted[K]].m_TimeLastAdded = FInGameTime::FromSeconds(float(Total - K));
+        return true;
+    }
+
+    // Moves the items of the tab types into the sorted order within the list
+    // places those items already hold. Empty entries and items of types the
+    // tabs do not list keep their place. Every item keeps its id equal to its
+    // place in the list, as the game keeps it. Wanted (list places in the
+    // wanted order) is updated to the new places. Returns true when it moved
+    // anything.
+    bool MoveEntries(TArray<FItemVirtualData>& Items, const TArray<int>& Entries,
+                     const TArray<int>& Group, TArray<int>& Wanted)
+    {
+        // List places of the tab-type items, in list order. Types the tabs do
+        // not list sort last, so these items are the first ones in Wanted.
+        TArray<int> Spots;
+        for (int K = 0; K < Entries.Num(); ++K)
+        {
+            if (Group[K] < TypeOrder.Num())
+                Spots.Add(Entries[K]);
+        }
+
+        bool bInPlace = true;
+        for (int K = 0; K < Spots.Num(); ++K)
+        {
+            if (Wanted[K] != Spots[K])
+            {
+                bInPlace = false;
+                break;
+            }
+        }
+        if (bInPlace)
+            return false;
+
+        TArray<FItemVirtualData> Before = Items;
+        for (int K = 0; K < Spots.Num(); ++K)
+        {
+            Items[Spots[K]] = Before[Wanted[K]];
+            Items[Spots[K]].m_Id = Spots[K];
+            Wanted[K] = Spots[K];
+        }
         return true;
     }
 
@@ -331,7 +349,101 @@ class UInventorySortBase : UGothicModExt_WidgetExtension
     }
 }
 
+// The hero's inventory screen.
 class UInventorySortInventory : UInventorySortBase
 {
     default AddToWidgetOfClass = n"/Game/UI/ManagementUI/Inventory/W_Inventory_Main.W_Inventory_Main_C";
+
+    // How often the open inventory is checked, in seconds.
+    const float32 CheckInterval = 0.2f;
+
+    float32 SinceCheck = 1.0f;
+
+    UFUNCTION(BlueprintOverride)
+    void Tick(FGeometry MyGeometry, float32 InDeltaTime)
+    {
+        SinceCheck += InDeltaTime;
+        if (SinceCheck < CheckInterval)
+            return;
+        SinceCheck = 0.0f;
+
+        if (!UInventorySortSettings.DefaultObject.Enabled.bValue)
+            return;
+
+        auto Inventory = Cast<UInventoryMain>(GetWidget());
+        if (!IsValid(Inventory) || !Inventory.IsVisible())
+            return;
+
+        // Only the hero's own inventory screen. The trade screen's lists are
+        // this widget too; UInventorySortTrading sorts the sell list there.
+        // Loot and crafting lists show the same items, but keep them still
+        // while those screens are open.
+        EInventoryOpenedStates State = Inventory.GetInventoryOpenedState();
+        if (State == EInventoryOpenedStates::Looting
+            || State == EInventoryOpenedStates::TradingInventoryPlayer
+            || State == EInventoryOpenedStates::TradingInventoryTrader
+            || State == EInventoryOpenedStates::Crafting)
+            return;
+        // Picking a ring or armor slot works with item positions in the view.
+        if (Inventory.IsWearableEquipmentMode())
+            return;
+
+        UDataModule_Container Container = DataModule::GetContainerDataModule(Gameplay::GetPlayerCharacter(0));
+        if (!IsValid(Container))
+            return;
+
+        if (SortBackpack(Container, false))
+            Inventory.RefreshInventory(true);
+    }
+}
+
+// The trade screen: its sell list shows the backpack in list order.
+class UInventorySortTrading : UInventorySortBase
+{
+    default AddToWidgetOfClass = n"/Game/UI/TradingNew/W_Trading_Main.W_Trading_Main_C";
+
+    // Checked every frame, so the list is sorted again in the same frame the
+    // game changes it (screen opened, trade accepted), before the next click.
+    UFUNCTION(BlueprintOverride)
+    void Tick(FGeometry MyGeometry, float32 InDeltaTime)
+    {
+        if (!UInventorySortSettings.DefaultObject.Enabled.bValue)
+            return;
+
+        auto Trading = Cast<UTradingMain>(GetWidget());
+        if (!IsValid(Trading) || !Trading.IsVisible())
+            return;
+        UInventoryMain Sell = Trading.W_TradingInventory_Sell;
+        UTradingBalance Balance = Trading.W_Trading_Balance;
+        if (!IsValid(Sell) || !IsValid(Balance))
+            return;
+
+        // Items waiting in the trade panel point at their place in the
+        // backpack list, so the list must not move while any are there.
+        if (HasWaitingItems(Balance.W_Trading_BalanceSection_Sell)
+            || HasWaitingItems(Balance.W_Trading_BalanceSection_Buy))
+            return;
+
+        UDataModule_Container Container = DataModule::GetContainerDataModule(Gameplay::GetPlayerCharacter(0));
+        if (!IsValid(Container))
+            return;
+
+        if (SortBackpack(Container, true))
+            Sell.RefreshInventory(true);
+    }
+
+    // True when a section of the trade panel holds an item, or cannot be read.
+    bool HasWaitingItems(UTradingBalanceInventory Section) const
+    {
+        if (!IsValid(Section) || !IsValid(Section.TileView_Items) || !IsValid(Section.TileView_Items.TileView_Grid))
+            return true;
+        TArray<UObject> Listed = Section.TileView_Items.TileView_Grid.GetListItems();
+        for (UObject Entry : Listed)
+        {
+            auto Data = Cast<UInventorySlotData>(Entry);
+            if (IsValid(Data) && !Data.m_IsEmpty && Data.m_Amount > 0)
+                return true;
+        }
+        return false;
+    }
 }
