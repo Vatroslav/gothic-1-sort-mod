@@ -13,11 +13,21 @@
 //
 // The trade screen's sell list ignores those times: after the hotbar it shows
 // the backpack items in the order of the game's backpack list (checked against
-// a save and a screenshot). There the mod moves the items themselves into the
-// sorted places of that list, but only while nothing waits in the trade panel,
-// because waiting items point at their place in the list.
+// a save and a screenshot). The trade screen copies that list when it opens
+// and again after each trade, and a sale takes the item from the place the
+// copy gives it. Moving the list while the screen is open makes the game take
+// a different item than the one clicked (version 0.3.0 did that, checked
+// against saves). So the mod moves the items themselves into the sorted places
+// of the list only during a conversation, before the trade screen opens, and
+// never while a trade screen is shown.
 //
 // Equipped items and the hotbar live in their own lists and are not touched.
+
+// Shared between the extensions: the frame in which a trade screen last ticked.
+class UInventorySortState : UObject
+{
+    int64 LastTradeFrame = -1000;
+}
 
 // Settings > Game > Inventory Sort. The Options menu edits and saves the
 // default object, so the extension reads the current value from there.
@@ -375,9 +385,9 @@ class UInventorySortInventory : UInventorySortBase
             return;
 
         // Only the hero's own inventory screen. The trade screen's lists are
-        // this widget too; UInventorySortTrading sorts the sell list there.
-        // Loot and crafting lists show the same items, but keep them still
-        // while those screens are open.
+        // this widget too, and show the list order that
+        // UInventorySortConversation sorts. Loot and crafting lists show the
+        // same items, but keep them still while those screens are open.
         EInventoryOpenedStates State = Inventory.GetInventoryOpenedState();
         if (State == EInventoryOpenedStates::Looting
             || State == EInventoryOpenedStates::TradingInventoryPlayer
@@ -397,53 +407,81 @@ class UInventorySortInventory : UInventorySortBase
     }
 }
 
-// The trade screen: its sell list shows the backpack in list order.
-class UInventorySortTrading : UInventorySortBase
+// The conversation screen: moves the backpack items into their sorted places
+// in the list, so a trade screen opened from the conversation copies a sorted
+// list and its sell list shows the sorted order. Trading is only started from
+// conversations in the game's scripts.
+class UInventorySortConversation : UInventorySortBase
 {
-    default AddToWidgetOfClass = n"/Game/UI/TradingNew/W_Trading_Main.W_Trading_Main_C";
+    default AddToWidgetOfClass = n"/Game/UI/Conversation/V2/W_ConversationMain.W_ConversationMain_C";
 
-    // Checked every frame, so the list is sorted again in the same frame the
-    // game changes it (screen opened, trade accepted), before the next click.
+    // How often the open conversation is checked, in seconds.
+    const float32 CheckInterval = 0.1f;
+
+    // Frames after a trade screen last ticked in which the list stays still.
+    const int64 TradeQuietFrames = 30;
+
+    float32 SinceCheck = 1.0f;
+
     UFUNCTION(BlueprintOverride)
     void Tick(FGeometry MyGeometry, float32 InDeltaTime)
     {
+        SinceCheck += InDeltaTime;
+        if (SinceCheck < CheckInterval)
+            return;
+        SinceCheck = 0.0f;
+
         if (!UInventorySortSettings.DefaultObject.Enabled.bValue)
             return;
 
-        auto Trading = Cast<UTradingMain>(GetWidget());
-        if (!IsValid(Trading) || !Trading.IsVisible())
-            return;
-        UInventoryMain Sell = Trading.W_TradingInventory_Sell;
-        UTradingBalance Balance = Trading.W_Trading_Balance;
-        if (!IsValid(Sell) || !IsValid(Balance))
+        UUserWidget Conversation = GetWidget();
+        if (!IsValid(Conversation) || !Conversation.IsVisible())
             return;
 
-        // Items waiting in the trade panel point at their place in the
-        // backpack list, so the list must not move while any are there.
-        if (HasWaitingItems(Balance.W_Trading_BalanceSection_Sell)
-            || HasWaitingItems(Balance.W_Trading_BalanceSection_Buy))
+        // A trade screen copies the list when it opens; moving the list
+        // under that copy makes a sale take a different item.
+        if (System::GetFrameCount() - UInventorySortState.DefaultObject.LastTradeFrame < TradeQuietFrames)
             return;
 
-        UDataModule_Container Container = DataModule::GetContainerDataModule(Gameplay::GetPlayerCharacter(0));
+        auto Hero = Cast<AGothicCharacter>(Gameplay::GetPlayerCharacter(0));
+        if (!IsValid(Hero) || !Hero.IsInConversation())
+            return;
+
+        UDataModule_Container Container = DataModule::GetContainerDataModule(Hero);
         if (!IsValid(Container))
             return;
 
-        if (SortBackpack(Container, true))
-            Sell.RefreshInventory(true);
+        SortBackpack(Container, true);
+    }
+}
+
+// The trade screen: does not sort, only tells the conversation screen to keep
+// the list still while a trade screen is shown.
+class UInventorySortTrading : UGothicModExt_WidgetExtension
+{
+    default AddToWidgetOfClass = n"/Game/UI/TradingNew/W_Trading_Main.W_Trading_Main_C";
+
+    UFUNCTION(BlueprintOverride)
+    bool RequiresTick() const
+    {
+        return true;
     }
 
-    // True when a section of the trade panel holds an item, or cannot be read.
-    bool HasWaitingItems(UTradingBalanceInventory Section) const
+    UFUNCTION(BlueprintOverride)
+    void Construct()
     {
-        if (!IsValid(Section) || !IsValid(Section.TileView_Items) || !IsValid(Section.TileView_Items.TileView_Grid))
-            return true;
-        TArray<UObject> Listed = Section.TileView_Items.TileView_Grid.GetListItems();
-        for (UObject Entry : Listed)
-        {
-            auto Data = Cast<UInventorySlotData>(Entry);
-            if (IsValid(Data) && !Data.m_IsEmpty && Data.m_Amount > 0)
-                return true;
-        }
-        return false;
+        MarkTradeShown();
+    }
+
+    UFUNCTION(BlueprintOverride)
+    void Tick(FGeometry MyGeometry, float32 InDeltaTime)
+    {
+        MarkTradeShown();
+    }
+
+    void MarkTradeShown()
+    {
+        auto State = UInventorySortState.DefaultObject;
+        State.LastTradeFrame = System::GetFrameCount();
     }
 }
